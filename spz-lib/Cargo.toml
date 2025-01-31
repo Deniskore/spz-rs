@@ -1,0 +1,17 @@
+[package]
+name = "spz-lib"
+version = "0.1.0"
+edition = "2021"
+authors = ["Denis Avvakumov"]
+description = "A Rust library for compressing PLY files."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+categories = ["compression", "graphics", "3d"]
+keywords = ["PLY", "compression"]
+
+[dependencies]
+foldhash = "0.1.4"
+half = "2.4.1"
+memchr = "2.7.4"
+zstd = { version = "0.13.2", features = ["zstdmt"] }
+bytemuck = "1.21.0"

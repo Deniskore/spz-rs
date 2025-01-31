@@ -1,0 +1,14 @@
+[package]
+name = "spz"
+version = "0.1.0"
+edition = "2021"
+authors = ["Denis Avvakumov"]
+description = "An executable that utilizes the spz-lib library to compress PLY files."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+categories = ["compression", "graphics", "3d"]
+keywords = ["PLY", "compression"]
+
+[dependencies]
+spz-lib = { path = "../spz-lib"}
+clap = { version = "4.5.27", features = ["derive"] }
