@@ -1,5 +1,5 @@
 pub mod common;
-mod error;
+pub mod error;
 mod structures;
 
 use common::clamp_u8;
@@ -442,13 +442,13 @@ fn parse_splat(raw_data: &[u8]) -> Result<GaussianCloud, SpzError> {
         let opacity = bytes_to_f32(&vertex_data[iop * 4..(iop + 1) * 4], "opacity")?;
         cloud.alphas.push(opacity);
 
-        // **Colors**
+        // Colors
         let c0 = bytes_to_f32(&vertex_data[ic0 * 4..(ic0 + 1) * 4], "f_dc_0")?;
         let c1 = bytes_to_f32(&vertex_data[ic1 * 4..(ic1 + 1) * 4], "f_dc_1")?;
         let c2 = bytes_to_f32(&vertex_data[ic2 * 4..(ic2 + 1) * 4], "f_dc_2")?;
         cloud.colors.extend_from_slice(&[c0, c1, c2]);
 
-        // **Spherical Harmonics**
+        // Spherical Harmonics
         for &(r_idx, g_idx, b_idx) in &sh_indices {
             let r = bytes_to_f32(&vertex_data[r_idx * 4..(r_idx + 1) * 4], "sh_r")?;
             let g = bytes_to_f32(&vertex_data[g_idx * 4..(g_idx + 1) * 4], "sh_g")?;
@@ -462,7 +462,6 @@ fn parse_splat(raw_data: &[u8]) -> Result<GaussianCloud, SpzError> {
     Ok(cloud)
 }
 
-// TODO: Implement async version
 #[inline(never)]
 fn compress_zstd(data: &[u8], level: u32, workers: u32) -> Result<Vec<u8>, SpzError> {
     let mut encoder = Encoder::new(Vec::new(), level as i32)
@@ -477,11 +476,9 @@ fn compress_zstd(data: &[u8], level: u32, workers: u32) -> Result<Vec<u8>, SpzEr
     let compressed_data = encoder
         .finish()
         .map_err(|e| SpzError::ZstdCompress(format!("Finalizing compression failed: {}", e)))?;
-
     Ok(compressed_data)
 }
 
-// TODO: Implement async version
 #[inline(never)]
 fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>, SpzError> {
     decode_all(Cursor::new(data))
@@ -604,76 +601,43 @@ fn deserialize_packed_gaussians(data: &[u8]) -> Result<DpGaussians, SpzError> {
     })
 }
 
-pub fn compress(
-    raw_data: &[u8],
-    compression_level: u32,
-    workers: u32,
-    output: &mut Vec<u8>,
-) -> Result<(), SpzError> {
-    let gaussian_cloud: GaussianCloud =
-        parse_splat(raw_data).map_err(|e| SpzError::ParseSplat(e.to_string()))?;
-
+pub fn prepare_uncompressed(raw_data: &[u8]) -> Result<Vec<u8>, SpzError> {
+    let gaussian_cloud = parse_splat(raw_data).map_err(|e| SpzError::ParseSplat(e.to_string()))?;
     if gaussian_cloud.num_points == 0 {
         return Err(SpzError::EmptyGaussianCloud);
     }
-
     let packed = pack_gaussians(&gaussian_cloud);
-
     let uncompressed = serialize_packed_gaussians(&packed)
         .map_err(|e| SpzError::SerializePackedGaussians(e.to_string()))?;
-
-    let compressed = compress_zstd(&uncompressed, compression_level, workers)
-        .map_err(|e| SpzError::ZstdCompress(e.to_string()))?;
-
-    output.clear();
-    output.extend_from_slice(&compressed);
-
-    Ok(())
+    Ok(uncompressed)
 }
 
-// TODO: Implement async version
-pub fn decompress(
-    spz_data: &[u8],
-    include_normals: bool,
+fn write_ply(
     output: &mut Vec<u8>,
+    cloud: &GaussianCloud,
+    include_normals: bool,
 ) -> Result<(), SpzError> {
-    let uncompressed =
-        decompress_zstd(spz_data).map_err(|e| SpzError::ZstdDecompress(e.to_string()))?;
-
-    let packed = deserialize_packed_gaussians(&uncompressed)
-        .map_err(|e| SpzError::DeserializePackedGaussians(e.to_string()))?;
-
-    if packed.num_points == 0 {
-        return Err(SpzError::EmptyPackedGaussians);
-    }
-
-    let cloud = unpack_gaussians(&packed);
-
-    let num_points: usize = cloud.num_points as usize;
-    let sh_dim = dim_for_degree(cloud.sh_degree) as usize;
+    let num_points = cloud.num_points as usize;
+    let sh_dim = dim_for_degree(cloud.sh_degree);
 
     output.clear();
     output.extend_from_slice(b"ply\nformat binary_little_endian 1.0\n");
     writeln!(output, "element vertex {}", num_points).map_err(SpzError::IoError)?;
     output.extend_from_slice(b"property float x\nproperty float y\nproperty float z\n");
-
     if include_normals {
         output.extend_from_slice(b"property float nx\nproperty float ny\nproperty float nz\n");
     }
-
     output.extend_from_slice(
         b"property float f_dc_0\nproperty float f_dc_1\nproperty float f_dc_2\n",
     );
-
     for i in 0..(sh_dim * 3) {
         writeln!(output, "property float f_rest_{}", i).map_err(SpzError::IoError)?;
     }
-
     output.extend_from_slice(
         b"property float opacity\n\
-           property float scale_0\nproperty float scale_1\nproperty float scale_2\n\
-           property float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float rot_3\n\
-           end_header\n",
+          property float scale_0\nproperty float scale_1\nproperty float scale_2\n\
+          property float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float rot_3\n\
+          end_header\n",
     );
 
     // Estimate and reserve the required space
@@ -682,7 +646,6 @@ pub fn decompress(
 
     let normals: &[u8] = bytemuck::bytes_of(&[0.0f32; 3]);
     let mut sh_coeffs = Vec::with_capacity(3 * sh_dim);
-
     for i in 0..num_points {
         // Positions (x, y, z)
         let pos_slice = &cloud.positions[i * 3..i * 3 + 3];
@@ -723,8 +686,121 @@ pub fn decompress(
         ];
         output.extend_from_slice(bytemuck::cast_slice(rot_slice));
     }
-
     Ok(())
+}
+
+pub fn compress(
+    raw_data: &[u8],
+    compression_level: u32,
+    workers: u32,
+    output: &mut Vec<u8>,
+) -> Result<(), SpzError> {
+    let uncompressed = prepare_uncompressed(raw_data)?;
+    let compressed = compress_zstd(&uncompressed, compression_level, workers)
+        .map_err(|e| SpzError::ZstdCompress(e.to_string()))?;
+    output.clear();
+    output.extend_from_slice(&compressed);
+    Ok(())
+}
+
+pub fn decompress(
+    spz_data: &[u8],
+    include_normals: bool,
+    output: &mut Vec<u8>,
+) -> Result<(), SpzError> {
+    let uncompressed =
+        decompress_zstd(spz_data).map_err(|e| SpzError::ZstdDecompress(e.to_string()))?;
+    let packed = deserialize_packed_gaussians(&uncompressed)
+        .map_err(|e| SpzError::DeserializePackedGaussians(e.to_string()))?;
+    if packed.num_points == 0 {
+        return Err(SpzError::EmptyPackedGaussians);
+    }
+    let cloud = unpack_gaussians(&packed);
+    write_ply(output, &cloud, include_normals)
+}
+
+cfg_if::cfg_if! {
+if #[cfg(feature = "async")] {
+    use async_compression::zstd::CParameter;
+    use async_compression::Level;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use async_compression::tokio::bufread::ZstdDecoder;
+    use async_compression::tokio::write::ZstdEncoder;
+    use tokio::io::BufReader;
+
+    #[inline(never)]
+    async fn compress_zstd_async(
+        data: &[u8],
+        level: u32,
+        workers: u32,
+    ) -> Result<Vec<u8>, SpzError> {
+        let mut compressed = Vec::new();
+        let params = &[CParameter::nb_workers(workers)];
+        let mut encoder = ZstdEncoder::with_quality_and_params(
+            &mut compressed,
+            Level::Precise(level as i32),
+            params,
+        );
+
+        encoder.write_all(data)
+            .await
+            .map_err(|e| SpzError::ZstdCompress(e.to_string()))?;
+
+        encoder.shutdown()
+            .await
+            .map_err(|e| SpzError::ZstdCompress(e.to_string()))?;
+
+        Ok(compressed)
+    }
+
+    #[inline(never)]
+    async fn decompress_zstd_async(data: &[u8]) -> Result<Vec<u8>, SpzError> {
+        let cursor = Cursor::new(data);
+        let reader = BufReader::new(cursor);
+        let mut decoder = ZstdDecoder::new(reader);
+        let mut decompressed = Vec::new();
+
+        decoder.read_to_end(&mut decompressed)
+            .await
+            .map_err(|e| SpzError::ZstdDecompress(e.to_string()))?;
+
+        Ok(decompressed)
+    }
+
+    #[inline(never)]
+    pub async fn compress_async(
+        raw_data: &[u8],
+        compression_level: u32,
+        workers: u32,
+        output: &mut Vec<u8>,
+    ) -> Result<(), SpzError> {
+        let uncompressed = prepare_uncompressed(raw_data)?;
+        let compressed = compress_zstd_async(&uncompressed, compression_level, workers)
+            .await
+            .map_err(|e| SpzError::ZstdCompress(e.to_string()))?;
+        output.clear();
+        output.extend_from_slice(&compressed);
+        Ok(())
+    }
+
+    #[inline(never)]
+    pub async fn decompress_async(
+        spz_data: &[u8],
+        include_normals: bool,
+        output: &mut Vec<u8>,
+    ) -> Result<(), SpzError> {
+        let uncompressed = decompress_zstd_async(spz_data)
+            .await
+            .map_err(|e| SpzError::ZstdDecompress(e.to_string()))?;
+        let packed = deserialize_packed_gaussians(&uncompressed)
+            .map_err(|e| SpzError::DeserializePackedGaussians(e.to_string()))?;
+        if packed.num_points == 0 {
+            return Err(SpzError::EmptyPackedGaussians);
+        }
+        let cloud = unpack_gaussians(&packed);
+        write_ply(output, &cloud, include_normals)
+    }
+}
 }
 
 #[cfg(test)]
@@ -746,8 +822,7 @@ mod tests {
         assert_eq!(cloud.num_points, 0);
     }
 
-    #[test]
-    fn test_compress_decompress() {
+    fn create_test_ply() -> Vec<u8> {
         // minimal .ply with 1 vertex:
         let header = b"ply
 format binary_little_endian 1.0
@@ -767,7 +842,8 @@ property float f_dc_0
 property float f_dc_1
 property float f_dc_2
 end_header
-";
+    ";
+
         #[rustfmt::skip]
         let floats = [
             // x, y, z
@@ -781,28 +857,50 @@ end_header
             // f_dc_0, f_dc_1, f_dc_2
             0.2, 0.3, 0.4,
         ];
+
         let mut raw_ply = Vec::new();
         raw_ply.extend_from_slice(header);
         for &f in &floats {
             raw_ply.extend_from_slice(&f.to_le_bytes());
         }
+        raw_ply
+    }
 
-        // Compress
-        let mut spz_data = Vec::new();
-        let ok = compress(&raw_ply, 1, 1, &mut spz_data).is_ok();
-        assert!(ok, "compress(...) failed.");
-
-        // Decompress -> .ply
-        let mut out_ply = Vec::new();
-        let ok = decompress(&spz_data, false, &mut out_ply).is_ok();
-        assert!(ok, "decompress(...) failed.");
-
-        // check that it's a .ply with "element vertex 1"
-        let text = String::from_utf8_lossy(&out_ply);
+    fn validate_output_ply(out_ply: &[u8]) {
+        let text = String::from_utf8_lossy(out_ply);
         assert!(
             text.contains("element vertex 1"),
             "Output .ply missing 'element vertex 1'"
         );
+    }
+
+    #[test]
+    fn test_compress_decompress() {
+        let raw_ply = create_test_ply();
+
+        let mut spz_data = Vec::new();
+        compress(&raw_ply, 1, 1, &mut spz_data).expect("compress(...) failed");
+
+        let mut out_ply = Vec::new();
+        decompress(&spz_data, false, &mut out_ply).expect("decompress(...) failed");
+
+        validate_output_ply(&out_ply);
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_compress_decompress_async() {
+        let raw_ply = create_test_ply();
+
+        let spz_data = compress_zstd_async(&raw_ply, 1, 1)
+            .await
+            .expect("compress_zstd_async failed");
+
+        let out_ply = decompress_zstd_async(&spz_data)
+            .await
+            .expect("decompress_zstd_async failed");
+
+        validate_output_ply(&out_ply);
     }
 
     fn count_differences(a: &[u8], b: &[u8]) -> usize {

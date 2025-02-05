@@ -1,13 +1,11 @@
 use clap::{ArgGroup, Parser};
-use spz_lib::{compress, decompress};
+use spz_lib::common::ZSTD_MAX_COMPRESSION_LVL;
+use spz_lib::{compress, compress_async, decompress, decompress_async};
+use std::cmp::min;
 use std::error::Error;
-use std::fs::File;
-use std::io::{Read, Write};
-use std::path::Path;
+use std::fs;
 use std::process;
 use std::time::Instant;
-
-use spz_lib::common::ZSTD_MAX_COMPRESSION_LVL;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -17,10 +15,7 @@ use spz_lib::common::ZSTD_MAX_COMPRESSION_LVL;
     about = "Compresses or decompresses PLY files (splats)"
 )]
 #[command(group(
-    ArgGroup::new("mode")
-        .required(true)
-        .args(&["compress", "decompress"])
-        .multiple(false)
+    ArgGroup::new("mode").required(true).args(&["compress", "decompress"])
 ))]
 struct Cli {
     #[arg(short = 'e', long = "compress", help = "Enable compression mode.")]
@@ -34,7 +29,7 @@ struct Cli {
         value_name = "INCLUDE_NORMALS",
         default_value = "false",
         long = "normals",
-        help = "Include normals from the output PLY file."
+        help = "Include normals from the output PLY file (only valid with decompression)."
     )]
     include_normals: bool,
 
@@ -57,7 +52,7 @@ struct Cli {
     output: String,
 
     #[arg(
-        short = 'с',
+        short = 'c',
         long = "compression-level",
         value_name = "LEVEL",
         default_value = "3",
@@ -73,82 +68,95 @@ struct Cli {
         help = "Set the workers count for ZSTD."
     )]
     workers: u32,
+
+    #[arg(
+        short = 'a',
+        long = "async",
+        default_value = "false",
+        help = "Enable asynchronous compression/decompression mode."
+    )]
+    async_mode: bool,
 }
 
-fn write_output(output_path: &str, data: &[u8]) {
-    let mut output_file = match File::create(output_path) {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!("Error creating output file '{}': {}", output_path, e);
-            process::exit(1);
-        }
-    };
-
-    if let Err(e) = output_file.write_all(data) {
-        eprintln!("Error writing to output file '{}': {}", output_path, e);
-        process::exit(1);
-    }
-
-    println!("Successfully wrote to '{}'.", output_path);
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let cli = Cli::parse();
 
     if cli.include_normals && !cli.decompress {
-        eprintln!("Error: --include-normals (-n) can only be used with decompression mode (-d).");
-        std::process::exit(1);
+        eprintln!("Error: --include-normals (-n) can only be used with decompression (-d).");
+        process::exit(1);
     }
 
-    let input_path = Path::new(&cli.input);
-    let mut input_file = match File::open(input_path) {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!("Error opening input file {}: {}", cli.input, e);
-            std::process::exit(1);
-        }
+    let raw_data = fs::read(&cli.input).unwrap_or_else(|e| {
+        eprintln!("Error reading input file {}: {}", cli.input, e);
+        process::exit(1);
+    });
+
+    let mode = if cli.async_mode {
+        "Asynchronous"
+    } else {
+        "Synchronous"
+    };
+    let op = if cli.compress {
+        "Compression"
+    } else {
+        "Decompression"
     };
 
-    let mut raw_data = Vec::new();
-    if let Err(e) = input_file.read_to_end(&mut raw_data) {
-        eprintln!("Error reading input file {}: {}", cli.input, e);
-        std::process::exit(1);
-    }
-
+    // Print the header info.
+    print!(
+        "Mode: {} {}\nInput: {} | Output: {}",
+        mode, op, cli.input, cli.output
+    );
     if cli.compress {
-        println!("Mode: Compression");
-        println!("Input File: {}", cli.input);
-        println!("Output File: {}", cli.output);
-        println!("Compression Level: {}", cli.compression_level);
-
-        let mut output = Vec::new();
-        let start_time = Instant::now();
-        compress(
-            &raw_data,
-            std::cmp::min(cli.compression_level, ZSTD_MAX_COMPRESSION_LVL),
-            cli.workers,
-            &mut output,
-        )?;
-        let duration = start_time.elapsed();
-        println!("Compression Time: {} ms", duration.as_millis());
-
-        write_output(&cli.output, &output);
-    } else if cli.decompress {
-        println!("Mode: Decompression");
-        println!("Input File: {}", cli.input);
-        println!("Output File: {}", cli.output);
-        if cli.include_normals {
-            println!("Excluding normals from the output PLY file.");
-        }
-
-        let mut output = Vec::new();
-        let start_time = Instant::now();
-        decompress(&raw_data, cli.include_normals, &mut output)?;
-        let duration = start_time.elapsed();
-        println!("Decompression Time: {} ms", duration.as_millis());
-
-        write_output(&cli.output, &output);
+        println!(" | Level: {}", cli.compression_level);
+    } else if cli.include_normals {
+        println!(" | Excluding normals from output");
+    } else {
+        println!();
     }
+
+    let cmp_level = min(cli.compression_level, ZSTD_MAX_COMPRESSION_LVL);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    let start = Instant::now();
+
+    let result: Vec<u8> = if cli.async_mode {
+        rt.block_on(async {
+            let mut buf = Vec::new();
+            if cli.compress {
+                compress_async(&raw_data, cmp_level, cli.workers, &mut buf)
+                    .await
+                    .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
+            } else {
+                decompress_async(&raw_data, cli.include_normals, &mut buf)
+                    .await
+                    .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
+            }
+            Ok::<Vec<u8>, Box<dyn Error + Send + Sync>>(buf)
+        })?
+    } else {
+        let mut buf = Vec::new();
+        if cli.compress {
+            compress(&raw_data, cmp_level, cli.workers, &mut buf)
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
+        } else {
+            decompress(&raw_data, cli.include_normals, &mut buf)
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
+        }
+        buf
+    };
+
+    let elapsed = start.elapsed().as_millis();
+    println!("{} Time: {} ms", op, elapsed);
+
+    fs::write(&cli.output, &result).unwrap_or_else(|e| {
+        eprintln!("Error writing output '{}': {}", cli.output, e);
+        process::exit(1);
+    });
+    println!("Successfully wrote to '{}'.", cli.output);
 
     Ok(())
 }
