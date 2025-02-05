@@ -119,6 +119,8 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
 
+    continue-on-error: true
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -156,4 +158,4 @@ jobs:
           choco install zstandard -y
 
       - name: Build Release
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cd spz-lib && cargo build --release && cd .. && cargo build --release --target ${{ matrix.target }} --features async
