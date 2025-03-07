@@ -24,6 +24,10 @@ use structures::PackedGaussiansHeader;
 use structures::FLAG_ANTIALIASED;
 use structures::MAGIC;
 use structures::VERSION;
+use zerocopy::FromBytes;
+use zerocopy::IntoBytes;
+use zerocopy::F32;
+use zerocopy::LE;
 use zstd::stream::{decode_all, Encoder};
 
 impl DpGaussians<'_> {
@@ -41,61 +45,49 @@ fn pack_gaussians(gc: &GaussianCloud) -> PackedGaussians {
     let color_factor = color_scale * 255.0;
     let color_offset = 127.5; // 0.5 * 255.0
 
-    let positions: Vec<u8> = gc
-        .positions
-        .iter()
-        .flat_map(|&val| {
-            let fixed = (val * sf).round() as i32;
-            [
-                (fixed & 0xFF) as u8,
-                ((fixed >> 8) & 0xFF) as u8,
-                ((fixed >> 16) & 0xFF) as u8,
-            ]
-        })
-        .collect();
+    let mut positions: Vec<u8> = Vec::with_capacity(gc.positions.len() * 3);
+    positions.extend(gc.positions.iter().flat_map(|&val| {
+        let fixed = (val * sf).round() as i32;
+        [
+            (fixed & 0xFF) as u8,
+            ((fixed >> 8) & 0xFF) as u8,
+            ((fixed >> 16) & 0xFF) as u8,
+        ]
+    }));
 
-    let scales: Vec<u8> = gc
-        .scales
-        .iter()
-        .map(|&s| clamp_u8((s + 10.0) * 16.0))
-        .collect();
+    let mut scales: Vec<u8> = Vec::with_capacity(gc.scales.len());
+    scales.extend(gc.scales.iter().map(|&s| clamp_u8((s + 10.0) * 16.0)));
 
-    let rotations: Vec<u8> = gc
-        .rotations
-        .chunks_exact(4)
-        .flat_map(|quat| {
-            let (rx, ry, rz, rw) = (quat[0], quat[1], quat[2], quat[3]);
-            let mut q = normalize_quat((rx, ry, rz, rw));
-            let scale = if q.3 < 0.0 { -127.5 } else { 127.5 };
-            q = times_quat(q, scale);
-            q = plus_quat(q, (127.5, 127.5, 127.5, 127.5));
-            [clamp_u8(q.0), clamp_u8(q.1), clamp_u8(q.2)]
-        })
-        .collect();
+    let mut rotations: Vec<u8> = Vec::with_capacity((gc.rotations.len() / 4) * 3);
+    rotations.extend(gc.rotations.chunks_exact(4).flat_map(|quat| {
+        let (rx, ry, rz, rw) = (quat[0], quat[1], quat[2], quat[3]);
+        let mut q = normalize_quat((rx, ry, rz, rw));
+        let scale = if q.3 < 0.0 { -127.5 } else { 127.5 };
+        q = times_quat(q, scale);
+        q = plus_quat(q, (127.5, 127.5, 127.5, 127.5));
+        [clamp_u8(q.0), clamp_u8(q.1), clamp_u8(q.2)]
+    }));
 
-    let alphas: Vec<u8> = gc
-        .alphas
-        .iter()
-        .map(|&a| clamp_u8(sigmoid(a) * 255.0))
-        .collect();
+    let mut alphas: Vec<u8> = Vec::with_capacity(gc.alphas.len());
+    alphas.extend(gc.alphas.iter().map(|&a| clamp_u8(sigmoid(a) * 255.0)));
 
-    let colors: Vec<u8> = gc
-        .colors
-        .iter()
-        .map(|&c| clamp_u8(c * color_factor + color_offset))
-        .collect();
+    let mut colors: Vec<u8> = Vec::with_capacity(gc.colors.len());
+    colors.extend(
+        gc.colors
+            .iter()
+            .map(|&c| clamp_u8(c * color_factor + color_offset)),
+    );
 
     let sh = if gc.sh_degree > 0 {
         let sh_per_point = sh_dim * 3;
-        gc.sh
-            .chunks_exact(sh_per_point)
-            .flat_map(|chunk| {
-                chunk.iter().enumerate().map(|(j, &x)| {
-                    let bucket = if j < 9 { 8 } else { 16 };
-                    quantize_sh(x, bucket)
-                })
+        let mut sh_vec: Vec<u8> = Vec::with_capacity(gc.sh.len());
+        sh_vec.extend(gc.sh.chunks_exact(sh_per_point).flat_map(|chunk| {
+            chunk.iter().enumerate().map(|(j, &x)| {
+                let bucket = if j < 9 { 8 } else { 16 };
+                quantize_sh(x, bucket)
             })
-            .collect()
+        }));
+        sh_vec
     } else {
         Vec::new()
     };
@@ -254,9 +246,9 @@ fn idx_of(hm: &HashMap<&str, usize>, name: &str) -> Result<usize, SpzError> {
 
 #[inline(always)]
 fn bytes_to_f32(data: &[u8], field_name: &str) -> Result<f32, SpzError> {
-    Ok(f32::from_le_bytes(data.try_into().map_err(|e| {
-        SpzError::ParseSplat(format!("Byte conversion error for {}: {}", field_name, e))
-    })?))
+    let (val, _rest) = <F32<LE>>::read_from_prefix(data)
+        .map_err(|_| SpzError::ParseSplat(format!("Conversion error for {}", field_name)))?;
+    Ok(val.get())
 }
 
 #[inline(never)]
@@ -297,21 +289,15 @@ fn parse_splat(raw_data: &[u8]) -> Result<GaussianCloud, SpzError> {
         s.parse()
             .map_err(|e| SpzError::ParseSplat(format!("Parse error: {}", e)))?
     };
-    // If there are 0 vertices, return an empty GaussianCloud
     if num_points == 0 {
         return Ok(GaussianCloud::default());
     }
 
-    let mut field_names = Vec::new();
+    let mut field_map: HashMap<&str, usize> = HashMap::with_capacity(64);
+    let mut field_count = 0;
     loop {
-        let line = match next_line(raw_data, &mut offset) {
-            Some(l) => l,
-            None => {
-                return Err(SpzError::ParseSplat(
-                    "No 'end_header' found before EOF".to_string(),
-                ))
-            }
-        };
+        let line = next_line(raw_data, &mut offset)
+            .ok_or_else(|| SpzError::ParseSplat("No 'end_header' found before EOF".to_string()))?;
 
         // If line starts with "end_header", stop parsing the header
         if line.starts_with(b"end_header") {
@@ -325,19 +311,13 @@ fn parse_splat(raw_data: &[u8]) -> Result<GaussianCloud, SpzError> {
                 line
             )));
         }
-
-        // Extract the property name
         let raw_name = &line[b"property float ".len()..];
-        field_names.push(raw_name);
-    }
-
-    // Build field map
-    let mut field_map: HashMap<&str, usize> = HashMap::with_capacity(field_names.len());
-    for (i, &f_bytes) in field_names.iter().enumerate() {
-        let s = std::str::from_utf8(f_bytes)
+        let name = std::str::from_utf8(raw_name)
             .map_err(|e| SpzError::ParseSplat(format!("UTF-8 error in field name: {}", e)))?;
-        field_map.insert(s, i);
+        field_map.insert(name, field_count);
+        field_count += 1;
     }
+    let fields_per_vertex = field_count;
 
     // Retrieve field indices
     let ix = idx_of(&field_map, "x")?;
@@ -356,7 +336,7 @@ fn parse_splat(raw_data: &[u8]) -> Result<GaussianCloud, SpzError> {
     let ic2 = idx_of(&field_map, "f_dc_2")?;
 
     // Optional spherical harmonics: f_rest_0 to f_rest_44 (up to 45)
-    let mut sh_idx = Vec::new();
+    let mut sh_idx = Vec::with_capacity(45);
     for i in 0..45 {
         let nm = format!("f_rest_{}", i);
         if let Some(&found) = field_map.get(nm.as_str()) {
@@ -372,8 +352,7 @@ fn parse_splat(raw_data: &[u8]) -> Result<GaussianCloud, SpzError> {
     }
     let sh_dim = sh_idx.len() / 3;
 
-    // Calculate the expected byte length
-    let fields_per_vertex = field_names.len();
+    // Calculate the expected length of the binary vertex data
     let expected_bytes = num_points
         .checked_mul(fields_per_vertex)
         .and_then(|n| n.checked_mul(4))
@@ -485,8 +464,8 @@ fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>, SpzError> {
         .map_err(|e| SpzError::ZstdDecompress(format!("Decompression failed: {}", e)))
 }
 
-fn serialize_packed_gaussians(pg: &PackedGaussians) -> Result<Vec<u8>, SpzError> {
-    let header_size = size_of::<PackedGaussiansHeader>();
+fn serialize_packed_gaussians(mut pg: PackedGaussians) -> Result<Vec<u8>, SpzError> {
+    let header_size = std::mem::size_of::<PackedGaussiansHeader>();
     let data_size = pg.positions.len()
         + pg.alphas.len()
         + pg.colors.len()
@@ -495,6 +474,7 @@ fn serialize_packed_gaussians(pg: &PackedGaussians) -> Result<Vec<u8>, SpzError>
         + pg.sh.len();
 
     let mut out = Vec::with_capacity(header_size + data_size);
+
     let hdr = PackedGaussiansHeader {
         magic: MAGIC,
         version: VERSION,
@@ -504,20 +484,15 @@ fn serialize_packed_gaussians(pg: &PackedGaussians) -> Result<Vec<u8>, SpzError>
         flags: if pg.antialiased { FLAG_ANTIALIASED } else { 0 },
         reserved: 0,
     };
-    out.extend_from_slice(&hdr.magic.to_le_bytes());
-    out.extend_from_slice(&hdr.version.to_le_bytes());
-    out.extend_from_slice(&hdr.num_points.to_le_bytes());
-    out.push(hdr.sh_degree);
-    out.push(hdr.fractional_bits);
-    out.push(hdr.flags);
-    out.push(hdr.reserved);
+    out.extend_from_slice(hdr.as_bytes());
 
-    out.extend_from_slice(&pg.positions);
-    out.extend_from_slice(&pg.alphas);
-    out.extend_from_slice(&pg.colors);
-    out.extend_from_slice(&pg.scales);
-    out.extend_from_slice(&pg.rotations);
-    out.extend_from_slice(&pg.sh);
+    out.append(&mut pg.positions);
+    out.append(&mut pg.alphas);
+    out.append(&mut pg.colors);
+    out.append(&mut pg.scales);
+    out.append(&mut pg.rotations);
+    out.append(&mut pg.sh);
+
     Ok(out)
 }
 
@@ -607,7 +582,7 @@ pub fn prepare_uncompressed(raw_data: &[u8]) -> Result<Vec<u8>, SpzError> {
         return Err(SpzError::EmptyGaussianCloud);
     }
     let packed = pack_gaussians(&gaussian_cloud);
-    let uncompressed = serialize_packed_gaussians(&packed)
+    let uncompressed = serialize_packed_gaussians(packed)
         .map_err(|e| SpzError::SerializePackedGaussians(e.to_string()))?;
     Ok(uncompressed)
 }
@@ -644,21 +619,21 @@ fn write_ply(
     let point_size = (3 + if include_normals { 3 } else { 0 } + 3 + (sh_dim * 3) + 1 + 3 + 4) * 4;
     output.reserve(num_points * point_size);
 
-    let normals: &[u8] = bytemuck::bytes_of(&[0.0f32; 3]);
+    let normals: [f32; 3] = [0.0, 0.0, 0.0];
     let mut sh_coeffs = Vec::with_capacity(3 * sh_dim);
     for i in 0..num_points {
         // Positions (x, y, z)
-        let pos_slice = &cloud.positions[i * 3..i * 3 + 3];
-        output.extend_from_slice(bytemuck::cast_slice(pos_slice));
+        let pos_slice: &[f32] = &cloud.positions[i * 3..i * 3 + 3];
+        output.extend_from_slice(pos_slice.as_bytes());
 
         // Normals (nx, ny, nz) if included
         if include_normals {
-            output.extend_from_slice(normals);
+            output.extend_from_slice(normals.as_bytes());
         }
 
         // Colors (f_dc_0, f_dc_1, f_dc_2)
-        let color_slice = &cloud.colors[i * 3..i * 3 + 3];
-        output.extend_from_slice(bytemuck::cast_slice(color_slice));
+        let color_slice: &[f32] = &cloud.colors[i * 3..i * 3 + 3];
+        output.extend_from_slice(color_slice.as_bytes());
 
         // SH coefficients (f_rest_*)
         sh_coeffs.clear();
@@ -668,23 +643,23 @@ fn write_ply(
                 sh_coeffs.push(cloud.sh[idx]);
             }
         }
-        output.extend_from_slice(bytemuck::cast_slice(&sh_coeffs));
+        output.extend_from_slice(sh_coeffs.as_bytes());
 
         // Opacity
-        output.extend_from_slice(bytemuck::bytes_of(&cloud.alphas[i]));
+        output.extend_from_slice(cloud.alphas[i].as_bytes());
 
         // Scales (scale_0, scale_1, scale_2)
-        let scale_slice = &cloud.scales[i * 3..i * 3 + 3];
-        output.extend_from_slice(bytemuck::cast_slice(scale_slice));
+        let scale_slice: &[f32] = &cloud.scales[i * 3..i * 3 + 3];
+        output.extend_from_slice(scale_slice.as_bytes());
 
         // Rotations (w, x, y, z)
-        let rot_slice = &[
+        let rot_slice = [
             cloud.rotations[i * 4 + 3],
             cloud.rotations[i * 4],
             cloud.rotations[i * 4 + 1],
             cloud.rotations[i * 4 + 2],
         ];
-        output.extend_from_slice(bytemuck::cast_slice(rot_slice));
+        output.extend_from_slice(rot_slice.as_bytes());
     }
     Ok(())
 }

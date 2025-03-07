@@ -28,7 +28,7 @@ jobs:
       - name: Set Up Rust Toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.84.1
+          toolchain: 1.85.0
           components: clippy
           cache: false
           rustflags: "-D warnings"
@@ -51,7 +51,7 @@ jobs:
       - name: Set Up Rust Toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.84.1
+          toolchain: 1.85.0
           components: clippy
           cache: false
           rustflags: "-D warnings"
@@ -69,7 +69,7 @@ jobs:
       - name: Set Up Rust Toolchain with Rustfmt
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.84.1
+          toolchain: 1.85.0
           components: rustfmt
           cache: false
           rustflags: "-D warnings"
@@ -92,7 +92,7 @@ jobs:
       - name: Set Up Rust Toolchain with Clippy
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.84.1
+          toolchain: 1.85.0
           components: clippy
           cache: false
           rustflags: "-D warnings"
@@ -155,7 +155,7 @@ jobs:
       - name: Install System Dependencies (Windows x86_64)
         if: matrix.os == 'windows-latest' && matrix.target == 'x86_64-pc-windows-msvc'
         run: |
-          choco install zstandard -y
+          choco install zstandard -y --version=1.5.6
 
       - name: Build Release
         run: cd spz-lib && cargo build --release && cd .. && cargo build --release --target ${{ matrix.target }} --features async

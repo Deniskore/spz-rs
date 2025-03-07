@@ -4,4 +4,8 @@ members = ["spz", "spz-lib"]
 
 [profile.release]
 lto = true
+
+[profile.release.package.spz]
+codegen-units = 1
 opt-level = 3
+debug = true
