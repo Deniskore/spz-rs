@@ -1,3 +1,5 @@
+use zerocopy::{Immutable, IntoBytes};
+
 pub const MAGIC: u32 = 0x5053474E; // 'NGSP'
 pub const VERSION: u32 = 2;
 pub const FLAG_ANTIALIASED: u8 = 0x1;
@@ -43,8 +45,8 @@ pub struct DpGaussians<'a> {
     pub sh: &'a [u8],
 }
 
+#[derive(Debug, IntoBytes, Immutable, Clone, Copy)]
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
 pub struct PackedGaussiansHeader {
     pub magic: u32,
     pub version: u32,
