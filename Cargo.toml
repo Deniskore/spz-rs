@@ -2,6 +2,9 @@
 resolver = "2"
 members = ["spz", "spz-lib"]
 
+[workspace.dependencies]
+tokio = "1.45.1"
+
 [profile.release]
 lto = true
 

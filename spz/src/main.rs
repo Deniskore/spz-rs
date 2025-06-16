@@ -109,10 +109,15 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     );
     if cli.compress {
         println!(" | Level: {}", cli.compression_level);
-    } else if cli.include_normals {
-        println!(" | Excluding normals from output");
     } else {
-        println!();
+        println!(
+            " | {} normals from output",
+            if cli.include_normals {
+                "Including"
+            } else {
+                "Excluding"
+            }
+        );
     }
 
     let cmp_level = min(cli.compression_level, ZSTD_MAX_COMPRESSION_LVL);
