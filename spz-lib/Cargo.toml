@@ -13,11 +13,11 @@ keywords = ["PLY", "compression"]
 cfg-if = "1.0.1"
 foldhash = "0.1.5"
 half = "2.6.0"
-memchr = "2.7.4"
+memchr = "2.7.5"
 zstd = { version = "0.13.3", features = ["zstdmt"] }
 zerocopy = { version = "0.8.26", features = ["derive"]}
 tokio = { workspace = true, features = ["io-util"], optional = true }
-async-compression = { version = "0.4.25", features = ["zstdmt", "tokio"], optional = true }
+async-compression = { version = "0.4.27", features = ["zstdmt", "tokio"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

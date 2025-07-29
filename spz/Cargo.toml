@@ -11,5 +11,5 @@ keywords = ["PLY", "compression"]
 
 [dependencies]
 spz-lib = { path = "../spz-lib", features = ["async"] }
-clap = { version = "4.5.40", features = ["derive"] }
+clap = { version = "4.5.41", features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
