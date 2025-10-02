@@ -496,7 +496,7 @@ fn serialize_packed_gaussians(mut pg: PackedGaussians) -> Result<Vec<u8>, SpzErr
     Ok(out)
 }
 
-fn deserialize_packed_gaussians(data: &[u8]) -> Result<DpGaussians, SpzError> {
+fn deserialize_packed_gaussians(data: &[u8]) -> Result<DpGaussians<'_>, SpzError> {
     if data.len() < 16 {
         return Err(SpzError::DeserializePackedGaussians(
             "Corrupt header".to_string(),
