@@ -10,14 +10,14 @@ categories = ["compression", "graphics", "3d"]
 keywords = ["PLY", "compression"]
 
 [dependencies]
-cfg-if = "1.0.1"
-foldhash = "0.1.5"
+cfg-if = "1.0.3"
+foldhash = "0.2.0"
 half = "2.6.0"
-memchr = "2.7.5"
+memchr = "2.7.6"
 zstd = { version = "0.13.3", features = ["zstdmt"] }
-zerocopy = { version = "0.8.26", features = ["derive"]}
+zerocopy = { version = "0.8.27", features = ["derive"]}
 tokio = { workspace = true, features = ["io-util"], optional = true }
-async-compression = { version = "0.4.27", features = ["zstdmt", "tokio"], optional = true }
+async-compression = { version = "0.4.32", features = ["zstdmt", "tokio"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

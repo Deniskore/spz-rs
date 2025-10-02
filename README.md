@@ -3,13 +3,12 @@ This is a low level Rust implementation of the [SPZ 404 library](https://github.
 
 ## Build Targets and Requirements
 The ZSTD package is required to build on all operating systems and architectures.
-The mold linker is necessary for improved build performance on specific platforms as outlined below:
 
 - **Windows (x86_64)**: Target CPU `x86-64-v3`.
 
-- **Linux (x86_64)**: The target CPU is `x86-64-v3`, with the **mold linker** used for building.
+- **Linux (x86_64)**: The target CPU is `x86-64-v3`
 
-- **Linux (aarch64)**: The target CPU features include NEON, SVE, AES, Dot Product, FP16, RCPC, and LSE extensions, with the **mold linker** used for building.
+- **Linux (aarch64)**: The target CPU features include NEON, SVE, AES, Dot Product, FP16, RCPC, and LSE extensions.
 
 - **macOS (aarch64)**: Target CPU `target-cpu=apple-m1`.
 
