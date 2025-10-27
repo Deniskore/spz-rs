@@ -2,6 +2,8 @@ pub mod common;
 pub mod error;
 mod structures;
 
+#[cfg(feature = "bytes")]
+use bytes::Bytes;
 use common::clamp_u8;
 use common::degree_for_dim;
 use common::dim_for_degree;
@@ -678,6 +680,22 @@ pub fn compress(
     Ok(())
 }
 
+#[cfg(feature = "bytes")]
+#[inline(never)]
+pub fn compress_bytes(
+    raw_data: Bytes,
+    compression_level: u32,
+    workers: u32,
+    output: &mut Vec<u8>,
+) -> Result<(), SpzError> {
+    let uncompressed = prepare_uncompressed(&raw_data)?;
+    let compressed = compress_zstd(&uncompressed, compression_level, workers)
+        .map_err(|e| SpzError::ZstdCompress(e.to_string()))?;
+    output.clear();
+    output.extend_from_slice(&compressed);
+    Ok(())
+}
+
 pub fn decompress(
     spz_data: &[u8],
     include_normals: bool,
@@ -685,6 +703,24 @@ pub fn decompress(
 ) -> Result<(), SpzError> {
     let uncompressed =
         decompress_zstd(spz_data).map_err(|e| SpzError::ZstdDecompress(e.to_string()))?;
+    let packed = deserialize_packed_gaussians(&uncompressed)
+        .map_err(|e| SpzError::DeserializePackedGaussians(e.to_string()))?;
+    if packed.num_points == 0 {
+        return Err(SpzError::EmptyPackedGaussians);
+    }
+    let cloud = unpack_gaussians(&packed);
+    write_ply(output, &cloud, include_normals)
+}
+
+#[cfg(feature = "bytes")]
+#[inline(never)]
+pub fn decompress_bytes(
+    spz_data: Bytes,
+    include_normals: bool,
+    output: &mut Vec<u8>,
+) -> Result<(), SpzError> {
+    let uncompressed =
+        decompress_zstd(spz_data.as_ref()).map_err(|e| SpzError::ZstdDecompress(e.to_string()))?;
     let packed = deserialize_packed_gaussians(&uncompressed)
         .map_err(|e| SpzError::DeserializePackedGaussians(e.to_string()))?;
     if packed.num_points == 0 {
@@ -702,6 +738,8 @@ if #[cfg(feature = "async")] {
     use async_compression::tokio::bufread::ZstdDecoder;
     use async_compression::tokio::write::ZstdEncoder;
     use tokio::io::BufReader;
+    use tokio::task::spawn_blocking;
+    use std::io;
 
     #[inline(never)]
     async fn compress_zstd_async(
@@ -744,12 +782,35 @@ if #[cfg(feature = "async")] {
 
     #[inline(never)]
     pub async fn compress_async(
-        raw_data: &[u8],
+        raw_data: Vec<u8>,
         compression_level: u32,
         workers: u32,
         output: &mut Vec<u8>,
     ) -> Result<(), SpzError> {
-        let uncompressed = prepare_uncompressed(raw_data)?;
+        // Offload CPU-bound prepare_uncompressed to blocking pool
+        let uncompressed = spawn_blocking(move || prepare_uncompressed(&raw_data))
+            .await
+            .map_err(|e| SpzError::IoError(io::Error::other(format!("join error: {}", e))))??;
+        let compressed = compress_zstd_async(&uncompressed, compression_level, workers)
+            .await
+            .map_err(|e| SpzError::ZstdCompress(e.to_string()))?;
+        output.clear();
+        output.extend_from_slice(&compressed);
+        Ok(())
+    }
+
+    #[cfg(feature = "bytes")]
+    #[inline(never)]
+    pub async fn compress_bytes_async(
+        raw_data: Bytes,
+        compression_level: u32,
+        workers: u32,
+        output: &mut Vec<u8>,
+    ) -> Result<(), SpzError> {
+        // Offload CPU-bound prepare_uncompressed to blocking pool
+        let uncompressed = spawn_blocking(move || prepare_uncompressed(&raw_data))
+            .await
+            .map_err(|e| SpzError::IoError(io::Error::other(format!("join error: {}", e))))??;
         let compressed = compress_zstd_async(&uncompressed, compression_level, workers)
             .await
             .map_err(|e| SpzError::ZstdCompress(e.to_string()))?;
@@ -767,13 +828,53 @@ if #[cfg(feature = "async")] {
         let uncompressed = decompress_zstd_async(spz_data)
             .await
             .map_err(|e| SpzError::ZstdDecompress(e.to_string()))?;
-        let packed = deserialize_packed_gaussians(&uncompressed)
-            .map_err(|e| SpzError::DeserializePackedGaussians(e.to_string()))?;
-        if packed.num_points == 0 {
-            return Err(SpzError::EmptyPackedGaussians);
-        }
-        let cloud = unpack_gaussians(&packed);
-        write_ply(output, &cloud, include_normals)
+        // Offload CPU-bound unpacking
+        let ply = spawn_blocking(move || {
+            let packed = deserialize_packed_gaussians(&uncompressed)
+                .map_err(|e| SpzError::DeserializePackedGaussians(e.to_string()))?;
+            if packed.num_points == 0 {
+                return Err(SpzError::EmptyPackedGaussians);
+            }
+            let cloud = unpack_gaussians(&packed);
+            let mut out = Vec::new();
+            write_ply(&mut out, &cloud, include_normals)?;
+            Ok::<_, SpzError>(out)
+        })
+        .await
+        .map_err(|e| SpzError::IoError(io::Error::other(format!("join error: {}", e))))??;
+
+        output.clear();
+        output.extend_from_slice(&ply);
+        Ok(())
+    }
+
+    #[cfg(feature = "bytes")]
+    #[inline(never)]
+    pub async fn decompress_bytes_async(
+        spz_data: Bytes,
+        include_normals: bool,
+        output: &mut Vec<u8>,
+    ) -> Result<(), SpzError> {
+        let uncompressed = decompress_zstd_async(spz_data.as_ref())
+            .await
+            .map_err(|e| SpzError::ZstdDecompress(e.to_string()))?;
+        let ply = spawn_blocking(move || {
+            let packed = deserialize_packed_gaussians(&uncompressed)
+                .map_err(|e| SpzError::DeserializePackedGaussians(e.to_string()))?;
+            if packed.num_points == 0 {
+                return Err(SpzError::EmptyPackedGaussians);
+            }
+            let cloud = unpack_gaussians(&packed);
+            let mut out = Vec::new();
+            write_ply(&mut out, &cloud, include_normals)?;
+            Ok::<_, SpzError>(out)
+        })
+        .await
+        .map_err(|e| SpzError::IoError(io::Error::other(format!("join error: {}", e))))??;
+
+        output.clear();
+        output.extend_from_slice(&ply);
+        Ok(())
     }
 }
 }

@@ -24,7 +24,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc g++ mold libzstd-dev
+          sudo apt-get install -y gcc g++ libzstd-dev
 
       - name: Set Up Rust Toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -47,7 +47,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc g++ mold libzstd-dev
+          sudo apt-get install -y gcc g++ libzstd-dev
 
       - name: Set Up Rust Toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -88,7 +88,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc g++ mold libzstd-dev
+          sudo apt-get install -y gcc g++ libzstd-dev
 
       - name: Set Up Rust Toolchain with Clippy
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -102,24 +102,22 @@ jobs:
         run: cargo clippy -- -D warnings
 
   build_release:
-    name: Build Release
-    runs-on: ${{ matrix.os }}
+    name: Build Release (${{ matrix.lib_features }}) [${{ matrix.platform.os }}]
+    runs-on: ${{ matrix.platform.os }}
     needs: [check, test, fmt, clippy]
     strategy:
       matrix:
-        include:
+        lib_features: ["none", "async", "bytes", "async,bytes"]
+        platform:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-
           - os: macos-latest
             target: aarch64-apple-darwin
-
+      fail-fast: false
     continue-on-error: true
 
     steps:
@@ -129,34 +127,53 @@ jobs:
       - name: Set Up Rust Toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
-          target: ${{ matrix.target }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          target: ${{ matrix.platform.target }}
           components: clippy
-          cache: false
-          rustflags: ${{ matrix.rustflags }}
+          cache: true
+          rustflags: "-D warnings"
 
       - name: Install System Dependencies (Linux x86_64)
-        if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.platform.os == 'ubuntu-latest' && matrix.platform.target == 'x86_64-unknown-linux-gnu'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc g++ mold libzstd-dev
+          sudo apt-get install -y gcc g++ libzstd-dev
 
       - name: Install System Dependencies (Linux aarch64)
-        if: matrix.os == 'ubuntu-24.04-arm' && matrix.target == 'aarch64-unknown-linux-gnu'
+        if: matrix.platform.os == 'ubuntu-24.04-arm' && matrix.platform.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc g++ mold libzstd-dev
+          sudo apt-get install -y gcc g++ libzstd-dev
 
       - name: Install System Dependencies (macOS aarch64)
-        if: matrix.os == 'macos-latest' && matrix.target == 'aarch64-apple-darwin'
+        if: matrix.platform.os == 'macos-latest' && matrix.platform.target == 'aarch64-apple-darwin'
         run: |
           brew update
           brew install gcc zstd
 
       - name: Install System Dependencies (Windows x86_64)
-        if: matrix.os == 'windows-latest' && matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.platform.os == 'windows-latest' && matrix.platform.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
         run: |
           choco install zstandard -y --version=1.5.6
 
       - name: Build Release
-        run: cd spz-lib && cargo build --release && cd .. && cargo build --release --target ${{ matrix.target }} --features async
+        env:
+          LIB_FEATURES: ${{ matrix.lib_features }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Build spz-lib with selected features
+          cd spz-lib
+          if [ "$LIB_FEATURES" = "none" ]; then
+            cargo build --release --no-default-features
+          else
+            cargo build --release --no-default-features --features "$LIB_FEATURES"
+          fi
+          cd ..
+          # Build spz binary only when async is enabled (it depends on async)
+          if echo "$LIB_FEATURES" | grep -q "async"; then
+            cargo build --release --target ${{ matrix.platform.target }} --no-default-features --features "$LIB_FEATURES"
+          else
+            echo "Skipping spz binary build for feature set: $LIB_FEATURES (async not enabled)"
+          fi

@@ -132,7 +132,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         rt.block_on(async {
             let mut buf = Vec::new();
             if cli.compress {
-                compress_async(&raw_data, cmp_level, cli.workers, &mut buf)
+                compress_async(raw_data, cmp_level, cli.workers, &mut buf)
                     .await
                     .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
             } else {
