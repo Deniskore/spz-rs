@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use clap::{ArgGroup, Parser};
 use spz_lib::common::ZSTD_MAX_COMPRESSION_LVL;
 use spz_lib::{compress, compress_async, decompress, decompress_async};
@@ -136,7 +137,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                     .await
                     .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
             } else {
-                decompress_async(&raw_data, cli.include_normals, &mut buf)
+                decompress_async(Bytes::from(raw_data), cli.include_normals, &mut buf)
                     .await
                     .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
             }

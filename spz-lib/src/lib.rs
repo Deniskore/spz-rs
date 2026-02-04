@@ -732,52 +732,25 @@ pub fn decompress_bytes(
 
 cfg_if::cfg_if! {
 if #[cfg(feature = "async")] {
-    use async_compression::zstd::CParameter;
-    use async_compression::Level;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use async_compression::tokio::bufread::ZstdDecoder;
-    use async_compression::tokio::write::ZstdEncoder;
-    use tokio::io::BufReader;
     use tokio::task::spawn_blocking;
     use std::io;
 
     #[inline(never)]
     async fn compress_zstd_async(
-        data: &[u8],
+        data: Bytes,
         level: u32,
         workers: u32,
     ) -> Result<Vec<u8>, SpzError> {
-        let mut compressed = Vec::new();
-        let params = &[CParameter::nb_workers(workers)];
-        let mut encoder = ZstdEncoder::with_quality_and_params(
-            &mut compressed,
-            Level::Precise(level as i32),
-            params,
-        );
-
-        encoder.write_all(data)
+        spawn_blocking(move || compress_zstd(data.as_ref(), level, workers))
             .await
-            .map_err(|e| SpzError::ZstdCompress(e.to_string()))?;
-
-        encoder.shutdown()
-            .await
-            .map_err(|e| SpzError::ZstdCompress(e.to_string()))?;
-
-        Ok(compressed)
+            .map_err(|e| SpzError::IoError(io::Error::other(format!("join error: {}", e))))?
     }
 
     #[inline(never)]
-    async fn decompress_zstd_async(data: &[u8]) -> Result<Vec<u8>, SpzError> {
-        let cursor = Cursor::new(data);
-        let reader = BufReader::new(cursor);
-        let mut decoder = ZstdDecoder::new(reader);
-        let mut decompressed = Vec::new();
-
-        decoder.read_to_end(&mut decompressed)
+    async fn decompress_zstd_async(data: Bytes) -> Result<Vec<u8>, SpzError> {
+        spawn_blocking(move || decompress_zstd(data.as_ref()))
             .await
-            .map_err(|e| SpzError::ZstdDecompress(e.to_string()))?;
-
-        Ok(decompressed)
+            .map_err(|e| SpzError::IoError(io::Error::other(format!("join error: {}", e))))?
     }
 
     #[inline(never)]
@@ -791,9 +764,8 @@ if #[cfg(feature = "async")] {
         let uncompressed = spawn_blocking(move || prepare_uncompressed(&raw_data))
             .await
             .map_err(|e| SpzError::IoError(io::Error::other(format!("join error: {}", e))))??;
-        let compressed = compress_zstd_async(&uncompressed, compression_level, workers)
-            .await
-            .map_err(|e| SpzError::ZstdCompress(e.to_string()))?;
+        let compressed =
+            compress_zstd_async(Bytes::from(uncompressed), compression_level, workers).await?;
         output.clear();
         output.extend_from_slice(&compressed);
         Ok(())
@@ -811,53 +783,21 @@ if #[cfg(feature = "async")] {
         let uncompressed = spawn_blocking(move || prepare_uncompressed(&raw_data))
             .await
             .map_err(|e| SpzError::IoError(io::Error::other(format!("join error: {}", e))))??;
-        let compressed = compress_zstd_async(&uncompressed, compression_level, workers)
-            .await
-            .map_err(|e| SpzError::ZstdCompress(e.to_string()))?;
+        let compressed =
+            compress_zstd_async(Bytes::from(uncompressed), compression_level, workers).await?;
         output.clear();
         output.extend_from_slice(&compressed);
         Ok(())
     }
 
-    #[inline(never)]
-    pub async fn decompress_async(
-        spz_data: &[u8],
-        include_normals: bool,
-        output: &mut Vec<u8>,
-    ) -> Result<(), SpzError> {
-        let uncompressed = decompress_zstd_async(spz_data)
-            .await
-            .map_err(|e| SpzError::ZstdDecompress(e.to_string()))?;
-        // Offload CPU-bound unpacking
-        let ply = spawn_blocking(move || {
-            let packed = deserialize_packed_gaussians(&uncompressed)
-                .map_err(|e| SpzError::DeserializePackedGaussians(e.to_string()))?;
-            if packed.num_points == 0 {
-                return Err(SpzError::EmptyPackedGaussians);
-            }
-            let cloud = unpack_gaussians(&packed);
-            let mut out = Vec::new();
-            write_ply(&mut out, &cloud, include_normals)?;
-            Ok::<_, SpzError>(out)
-        })
-        .await
-        .map_err(|e| SpzError::IoError(io::Error::other(format!("join error: {}", e))))??;
-
-        output.clear();
-        output.extend_from_slice(&ply);
-        Ok(())
-    }
-
     #[cfg(feature = "bytes")]
     #[inline(never)]
-    pub async fn decompress_bytes_async(
+    pub async fn decompress_async(
         spz_data: Bytes,
         include_normals: bool,
         output: &mut Vec<u8>,
     ) -> Result<(), SpzError> {
-        let uncompressed = decompress_zstd_async(spz_data.as_ref())
-            .await
-            .map_err(|e| SpzError::ZstdDecompress(e.to_string()))?;
+        let uncompressed = decompress_zstd_async(spz_data).await?;
         let ply = spawn_blocking(move || {
             let packed = deserialize_packed_gaussians(&uncompressed)
                 .map_err(|e| SpzError::DeserializePackedGaussians(e.to_string()))?;
@@ -968,11 +908,11 @@ end_header
     async fn test_compress_decompress_async() {
         let raw_ply = create_test_ply();
 
-        let spz_data = compress_zstd_async(&raw_ply, 1, 1)
+        let spz_data = compress_zstd_async(Bytes::from(raw_ply), 1, 1)
             .await
             .expect("compress_zstd_async failed");
 
-        let out_ply = decompress_zstd_async(&spz_data)
+        let out_ply = decompress_zstd_async(Bytes::from(spz_data))
             .await
             .expect("decompress_zstd_async failed");
 
